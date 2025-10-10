@@ -12,6 +12,9 @@ import pandas as pd
 from sklearn.preprocessing import MultiLabelBinarizer
 
 
+FAVORITE_GENRE_WEIGHT = 0.25
+
+
 class PreferenceError(ValueError):
     """A request needs different or more useful preferences."""
 
@@ -149,10 +152,10 @@ class HybridRecommender:
                                min_rating_count=0):
         """Return ranking scores (not predicted stars) plus deterministic explanations.
 
-        Profiles: selected genres contribute 1 each. Rated genre/embedding unit
-        vectors contribute (rating - 3), divided by total absolute rating weight.
-        Cosines in [-1,1] map to [0,1] with (cosine + 1)/2. Missing signals are
-        excluded from the weighted denominator, including per-movie fallbacks.
+        Ratings shape separate genre and movie-embedding profiles using (rating - 3).
+        The ratings score blends their available cosine similarities. Explicit genres
+        form an independent score with a 25% share when ratings also guide the ranking.
+        Cosines in [-1, 1] map to [0, 1] with (cosine + 1) / 2.
         Rating count only breaks exact score ties, unless an explicit filter is set.
         """
         if isinstance(favorite_genres, str):
@@ -171,27 +174,20 @@ class HybridRecommender:
         if not np.isfinite(weights).all() or (weights < 0).any() or weights.sum() <= 0:
             raise PreferenceError("Use finite nonnegative weights with a positive total.")
         weights /= weights.sum()
-        content_profile = np.zeros(len(self.genres))
+        favorite_profile = np.zeros(len(self.genres))
         for genre in genres:
-            content_profile[self._genre_columns[genre]] = 1.0
+            favorite_profile[self._genre_columns[genre]] = 1.0
         embedding_profile = np.zeros(self._embedding_units.shape[1])
-        genre_total = embedding_total = 0.0
-        genre_from_ratings = np.zeros(len(self.genres))
+        content_profile = np.zeros(len(self.genres))
         for movie_id, rating in ratings.items():
             row, weight = self._positions[movie_id], rating - 3.0
-            if np.any(self._genre_units[row]):
-                genre_from_ratings += weight * self._genre_units[row]
-                genre_total += abs(weight)
-            if self._has_embedding[row]:
-                embedding_profile += weight * self._embedding_units[row]
-                embedding_total += abs(weight)
-        if genre_total:
-            content_profile += genre_from_ratings / genre_total
-        if embedding_total:
-            embedding_profile /= embedding_total
+            content_profile += weight * self._genre_units[row]
+            embedding_profile += weight * self._embedding_units[row]
+        # Cosine normalization makes division by total absolute rating weight unnecessary
+        # now that the ratings profile is independent of the favorite-genre profile.
         has_content = np.linalg.norm(content_profile) > 1e-12
         has_embedding = np.linalg.norm(embedding_profile) > 1e-12
-        if not has_content and not has_embedding:
+        if not genres and not has_content and not has_embedding:
             raise PreferenceError("Choose a genre or add a rating above or below 3 stars so we can learn your taste.")
 
         content_raw = np.zeros(len(self._movies))
@@ -200,21 +196,37 @@ class HybridRecommender:
             content_raw = self._genre_units @ (content_profile / np.linalg.norm(content_profile))
         if has_embedding:
             embedding_raw = self._embedding_units @ (embedding_profile / np.linalg.norm(embedding_profile))
-        content_available = has_content & (self._genre_features.sum(axis=1) > 0)
+        has_genres = self._genre_features.any(axis=1)
+        content_available = has_content & has_genres
+        favorite_available = bool(genres and weights[0] > 0) & has_genres
+        favorite_score = np.zeros(len(self._movies))
+        if favorite_available.any():
+            favorite_raw = self._genre_units @ (favorite_profile / np.linalg.norm(favorite_profile))
+            favorite_score = np.clip((favorite_raw + 1) / 2, 0, 1)
         embedding_available = has_embedding & self._has_embedding
         content_score = np.clip((content_raw + 1) / 2, 0, 1)
         embedding_score = np.clip((embedding_raw + 1) / 2, 0, 1)
         denominator = weights[0] * content_available + weights[1] * embedding_available
-        if not np.any(denominator > 0):
+        ratings_available = denominator > 0
+        if not (ratings_available | favorite_available).any():
             raise PreferenceError("These weights disable your available preferences; allow a content or movie-history signal.")
         numerator = (weights[0] * content_available * content_score
                      + weights[1] * embedding_available * embedding_score)
-        scores = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+        ratings_score = np.divide(numerator, denominator, out=np.full_like(numerator, 0.5),
+                                  where=ratings_available)
+        # A title with only a favorite-genre score gets a neutral ratings contribution
+        # when the request otherwise has usable rating signals.
+        with_favorites = (FAVORITE_GENRE_WEIGHT * favorite_score
+                          + (1 - FAVORITE_GENRE_WEIGHT) * ratings_score
+                          if ratings_available.any() else favorite_score)
+        scores = np.where(favorite_available, with_favorites, ratings_score)
         results = self._movies.copy()
-        results["content_score"] = np.where(content_available, content_score, np.nan)
+        results["content_score"] = np.where(content_available, content_score,
+                                            np.where(favorite_available, favorite_score, np.nan))
+        results["favorite_genre_score"] = np.where(favorite_available, favorite_score, np.nan)
         results["embedding_score"] = np.where(embedding_available, embedding_score, np.nan)
         results["hybrid_score"] = scores
-        eligible = ((denominator > 0) & ~results.movieId.isin(ratings).to_numpy()
+        eligible = ((ratings_available | favorite_available) & ~results.movieId.isin(ratings).to_numpy()
                     & (results.rating_count.to_numpy() >= min_rating_count))
         results = results[eligible].sort_values(
             ["hybrid_score", "rating_count", "movieId"], ascending=[False, False, True]
@@ -224,16 +236,15 @@ class HybridRecommender:
         explanations = []
         for movie_id in results.movieId:
             row = self._positions[movie_id]
-            matching = [g for g in self._genre_lists.iloc[row]
-                        if content_profile[self._genre_columns[g]] > 1e-12]
-            selected = [g for g in matching if g in genres]
-            learned = [g for g in matching if g not in genres]
+            movie_genres = self._genre_lists.iloc[row]
+            selected = [g for g in movie_genres if g in genres]
+            learned = [g for g in movie_genres
+                       if content_profile[self._genre_columns[g]] > 1e-12]
             parts = []
-            if weights[0] > 0 and content_raw[row] > 1e-12:
-                if selected:
-                    parts.append("You selected " + " and ".join(selected[:2]) + " as favorite genres.")
-                if learned:
-                    parts.append("Your ratings favor " + " and ".join(learned[:2]) + " movies.")
+            if favorite_available[row] and selected:
+                parts.append("You selected " + " and ".join(selected[:2]) + " as favorite genres.")
+            if weights[0] > 0 and content_raw[row] > 1e-12 and learned:
+                parts.append("Your ratings favor " + " and ".join(learned[:2]) + " movies.")
             if weights[1] > 0 and embedding_available[row] and embedding_raw[row] > 1e-12:
                 similar = [(float(self._embedding_units[row] @ self._embedding_units[liked_row]),
                             rating, liked_row) for liked_row, rating in liked_with_embeddings]

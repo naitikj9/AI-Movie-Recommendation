@@ -1,9 +1,9 @@
 # Personalized Movie Recommender
 
 A graduate class project with a working Streamlit app for **new users**:
-**Preferences → Rate Movies → Recommendations**. Choose genres, search real MovieLens movies,
-rate five watched movies in half-star steps, then explore up to six personalized recommendations.
-Genres, ratings, and skips persist while moving between screens in the same session.
+**Choose a discovery method → Set preferences → Explore recommendations**. Start with five
+watched-movie ratings, or pick favorite genres and add ratings optionally. Both paths offer
+up to six recommendations. Switching paths keeps ratings and clears explicit genres.
 
 The interface follows the supplied Figma prototype screenshots: near-black backgrounds, coral
 accents, wrapping genre toggles, a movie picker beside Your Ratings on desktop, and a
@@ -70,36 +70,38 @@ It excludes that user's historically rated movies. The public UI focuses on new 
 
 ### New-user hybrid (src/hybrid_recommender.py)
 
-A new person has no trained user embedding. We never invent a MovieLens user ID or borrow
-another person's embedding. Instead we combine two request-local profiles:
+A new visitor’s profile is built from the movies they rate and, in the favorite-genres
+path, the genres they select. It uses learned movie embeddings from the saved model.
+There is no user-embedding lookup for this flow.
 
-1. **Genre profile.** Each selected genre contributes 1 to that genre's coordinate. A rated movie
-   contributes its unit-length genre vector multiplied by `rating - 3.0`. Sum rated contributions
-   and divide by their total absolute weight, then add the explicit genre selections. This keeps
-   a very long rating history from overwhelming explicitly selected genres.
-2. **Movie-space profile.** Look up each rated movie using the saved mapping. Sum its unit-length
-   learned movie embedding multiplied by `rating - 3.0`, then divide by total absolute weight.
-   Missing embeddings are skipped, not assigned invented factors.
+1. **Ratings.** Each rated movie contributes its unit-length genre vector and learned movie
+   embedding, scaled by its rating minus 3. Ratings above 3 pull toward similar titles, ratings
+   below 3 push away, and a 3 adds no directional signal. Compute cosine similarity to the
+   two profiles and blend the available genre and embedding scores 50/50 by default.
+2. **Favorite genres.** Compute a separate cosine similarity to a vector with equal entries for
+   the visitor’s chosen genres. Adding genres changes the profile’s direction without increasing
+   its share of the final score.
 
-We deliberately use **3 stars as the interaction's neutral point**, not the historical dataset
-mean (~3.5). It makes the UI convention simple: above 3 means positive, below 3 means negative,
-and exactly 3 contributes zero. A 0.5 rating has weight -2.5; a 5 has weight +2. Explicit genres
-can reinforce or counter the genres inferred from ratings. This is a documented heuristic.
-
-For each candidate, compute cosine similarity to each available profile. Convert signed cosine
-from `[-1,1]` to `[0,1]` using `(cosine + 1) / 2` (zero similarity becomes 0.5). Combine the scores:
+Each cosine is mapped to `[0, 1]` with `(cosine + 1) / 2`. Zero similarity maps to 0.5.
+The watched-movies path uses the ratings score alone, including any genre patterns inferred
+from rated movies. The favorite-genres path uses the genre score alone when there is no usable
+rating signal. When both signals are available, the formula is:
 
 ```text
-hybrid_score = 0.50 * content_score + 0.50 * embedding_score
+hybrid_score = 0.75 * ratings_score + 0.25 * favorite_genre_score
 ```
 
-Weights are configurable, nonnegative, and normalized to sum to 1. Missing or zero-norm signals
-are removed from the denominator and remaining weights are renormalized **per candidate**.
-Genre-only requests therefore use content only. A metadata movie without embeddings can still
-receive a content score; a movie without genres can still receive an embedding score. Candidates
-without any enabled signal are excluded. A zero-information profile (e.g., no genres and only
-neutral ratings) raises a friendly `PreferenceError`. If weights explicitly disable the only
-available signal, the request also returns a clear error.
+The previous formula added 1 for each explicit genre to a ratings-derived genre vector whose
+norm was bounded by 1. The explicit vector therefore had norm `sqrt(number of genres)`.
+The 50/50 genre-versus-embedding blend did not give genres and ratings equal influence.
+The separate score removes this effect. The cosine-to-score conversion applies the same
+linear transformation to both signals.
+
+Within the ratings score, an unavailable genre or embedding component is omitted and the
+remaining component receives its weight. A candidate without genre metadata can use its
+ratings score alone. If only its favorite-genre score is available in a mixed request,
+its ratings contribution is neutral (0.5). Candidates without any enabled signal are
+excluded. A zero-information profile raises a friendly `PreferenceError`.
 
 ```python
 movies = engine.recommend_for_new_user(
@@ -112,8 +114,8 @@ movies = engine.recommend_for_new_user(
 )
 ```
 
-Returned DataFrames include IDs, titles, genres, content/embedding/hybrid scores, explanations,
-rating counts, and average historical ratings. Missing component scores are `NaN`, not invented
+Returned DataFrames include IDs, titles, genres, content, embedding, favorite-genre and hybrid
+scores, explanations, rating counts, and average historical ratings. Missing component scores are `NaN`, not invented
 values. Rated movies are always excluded. Ranking sorts by hybrid score, then historical rating
 count only for exact ties, then movieId. Popularity never adds to the personalization score.
 
@@ -133,8 +135,8 @@ prediction from the original network.
 | Results were hard to interpret | Cards used generic movie-profile language. Each card now explains selected or inferred genre matches, a named highly rated movie with similar MovieLens rating patterns when supported, or a weaker match. Results are reused within the session for the same inputs. | App tests exercise genre-only and ratings-only results, missing posters, neutral ratings, and invalid IDs. |
 | Desktop layout crowded narrow screens | Fixed genre rows and side-by-side controls reduced usable space. Genre pills wrap, rating controls use larger targets, and cards flow into one, two, or three columns. | See the browser checks below. |
 
-With at least one selected genre, visitors can request recommendations before reaching five
-ratings. For a ratings-only request, five numeric ratings unlock recommendations. Five neutral
+In the favorite-genres path, at least one selection unlocks optional ratings and recommendations.
+In the watched-movies path, five numeric ratings unlock recommendations. Five neutral
 ratings give the ranking no preference direction, so the results page asks for a genre or a
 rating above or below three stars.
 
@@ -159,9 +161,10 @@ physical iPhone Safari are still to be checked.
 Use this checklist after starting locally or pushing the update to the GitHub branch
 connected to Community Cloud.
 
-1. Open a fresh browser session. On iPhone Safari, tap several genres quickly, deselect one,
-   and check that the selected state and count agree. Continue, then go back to verify persistence.
-2. With no genres selected, search for watched movies by partial title, try a title that has no
+1. Open a fresh browser session and choose the favorite-genres path. On iPhone Safari, tap
+   several genres quickly, deselect one, and check that the selected state and count agree.
+   Continue, then go back to verify persistence.
+2. Switch to the watched-movies path, search by partial title, try a title that has no
    matches, and choose **Haven’t Seen** for one title. Check that the count stays the same and
    that the results button becomes available after five numeric ratings.
 3. Repeat with a genre and fewer than five ratings. Check the card explanations and verify that

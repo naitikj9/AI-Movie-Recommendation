@@ -47,6 +47,11 @@
 .st-key-rating_library [data-testid="stText"] *,
 .st-key-your_ratings [data-testid="stText"] * { white-space: pre-wrap; overflow-wrap: anywhere; }
 .movie-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem; }
+.st-key-discovery_movies, .st-key-discovery_genres {
+  background: #13101b;
+  border-radius: 22px;
+  padding: clamp(16px, 3vw, 28px) !important;
+}
 .search-preview {
   display: grid;
   grid-template-columns: 68px minmax(0, 1fr);

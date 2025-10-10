@@ -93,6 +93,19 @@ def go_to(step):
     st.session_state.step = step
 
 
+def choose_mode(mode):
+    if st.session_state.discovery_mode != mode:
+        st.session_state.pop("recommendation_result", None)
+        st.session_state.favorite_genres = []
+        st.session_state.pop("genre_selection", None)
+    st.session_state.discovery_mode = mode
+    go_to(2 if mode == "movies" else 1)
+
+
+def selected_genres():
+    return tuple(st.session_state.favorite_genres) if st.session_state.discovery_mode == "genres" else ()
+
+
 def save_genres():
     st.session_state.favorite_genres = sorted(st.session_state.genre_selection)
 
@@ -135,15 +148,36 @@ def rating_label(value):
     return f"{'★' * int(value)}{'½' if value % 1 else ''}  {value:g} / 5"
 
 
-def header(step):
+def header(step, mode):
     st.html('''<header class="brand-bar"><div class="brand"><span class="brand-icon">▶</span>
     <div><strong>PERSONALIZED</strong><span>Movie Recommender</span></div></div>
     <span class="brand-tag">Your next favorite is waiting</span></header>''')
+    if step == 0:
+        return
+    stages = [(1, "Preferences"), (2, "Rate Movies"), (3, "Recommendations")]
+    if mode == "movies":
+        stages = stages[1:]
     items = []
-    for index, label in enumerate(["Preferences", "Rate Movies", "Recommendations"], 1):
-        state = "complete" if index < step else "active" if index == step else "future"
-        items.append(f'<div class="step {state}"><b>{"✓" if index < step else index}</b><span>{label}</span></div>')
+    for index, (stage, label) in enumerate(stages, 1):
+        state = "complete" if stage < step else "active" if stage == step else "future"
+        items.append(f'<div class="step {state}"><b>{"✓" if stage < step else index}</b><span>{label}</span></div>')
     st.html('<nav aria-label="Recommendation progress" class="stepper">' + '<i></i>'.join(items) + '</nav>')
+
+
+def discovery():
+    st.html('''<section class="hero"><p class="eyebrow">CURATED FOR YOU</p>
+    <h1>How would you like to <span>discover movies</span>?</h1></section>''')
+    movies, genres = st.columns(2, gap="large")
+    with movies, st.container(border=True, key="discovery_movies"):
+        st.subheader("Based on movies I've watched")
+        st.write("Search for and rate five movies you’ve seen. Your ratings alone guide your recommendations.")
+        st.button("Start with movie ratings", key="choose_movies", type="primary", width="stretch",
+                  on_click=choose_mode, args=("movies",))
+    with genres, st.container(border=True, key="discovery_genres"):
+        st.subheader("Based on my favorite genres")
+        st.write("Choose the genres you enjoy. If you add movie ratings, they’ll have more influence on your picks.")
+        st.button("Start with favorite genres", key="choose_genres", type="primary", width="stretch",
+                  on_click=choose_mode, args=("genres",))
 
 
 @st.fragment
@@ -155,6 +189,14 @@ def genre_picker(genres):
                             default=st.session_state.favorite_genres, key="genre_selection",
                             on_change=save_genres, label_visibility="collapsed", wrap=True)
         st.html(f'<span class="selection-count" role="status">{len(selected)} selected</span>')
+    back, next_column = st.columns([3, 1])
+    if back.button("Change discovery method", key="change_mode"):
+        go_to(0)
+        st.rerun()
+    if next_column.button("Continue  →", type="primary", width="stretch", key="continue",
+                          disabled=not selected):
+        go_to(2)
+        st.rerun()
 
 
 def preferences(genres):
@@ -162,10 +204,6 @@ def preferences(genres):
     <h1>Find Your Next <span>Favorite Movie</span></h1>
     <p>Tell us what you like and we’ll create movie recommendations personalized for you.</p></section>''')
     genre_picker(genres)
-    _, next_column = st.columns([4, 1])
-    next_column.button("Continue  →", type="primary", width="stretch", key="continue",
-                       on_click=go_to, args=(2,))
-    st.caption("You can also start with movie ratings instead of genres.")
 
 
 def rating_control(movie_id, prefix, label):
@@ -182,12 +220,16 @@ def rating_control(movie_id, prefix, label):
 def rate_movies(movies, labels, movie_ids):
     count = len(st.session_state.user_ratings)
     remaining = RATING_TARGET - count
-    st.html('<p class="eyebrow">STEP 2 OF 3</p>')
+    genre_mode = st.session_state.discovery_mode == "genres"
+    st.html(f'<p class="eyebrow">STEP {2 if genre_mode else 1} OF {3 if genre_mode else 2}</p>')
     st.title("Rate Movies You’ve Seen")
-    st.write("Search for five movies you’ve watched and give each a rating. Half stars are welcome.")
-    progress = (f"{count} of {RATING_TARGET} movies rated" if remaining > 0
-                else f"{count} movies rated · goal reached")
-    st.progress(min(count / RATING_TARGET, 1.0), text=progress)
+    if genre_mode:
+        st.write("Add ratings for movies you’ve watched, or continue with your favorite genres.")
+    else:
+        st.write("Search for five movies you’ve watched and give each a rating. Half stars are welcome.")
+        progress = (f"{count} of {RATING_TARGET} movies rated" if remaining > 0
+                    else f"{count} movies rated · goal reached")
+        st.progress(min(count / RATING_TARGET, 1.0), text=progress)
     library, ratings_panel = st.columns([2.1, 1], gap="large")
     with library:
         with st.container(border=True, key="rating_library"):
@@ -213,6 +255,8 @@ def rate_movies(movies, labels, movie_ids):
             st.subheader("Your Ratings")
             if not count:
                 st.caption("Your ratings will appear here.")
+            elif genre_mode:
+                st.caption(f"{count} movie{'s' if count != 1 else ''} rated")
             for movie_id in list(st.session_state.user_ratings):
                 if movie_id not in movies:
                     st.warning(f"Movie {movie_id} is unavailable.")
@@ -226,14 +270,14 @@ def rate_movies(movies, labels, movie_ids):
                 st.divider()
     st.divider()
     back, note, submit = st.columns([1, 2.4, 1.6])
-    back.button("←  Back", key="back", on_click=go_to, args=(1,))
-    genres_available = bool(st.session_state.favorite_genres)
-    ready = remaining <= 0 or genres_available
+    back.button("←  Back", key="back", on_click=go_to, args=(1 if genre_mode else 0,))
+    genres_available = bool(selected_genres())
+    ready = genres_available if genre_mode else remaining <= 0
     with note:
-        if remaining > 0 and genres_available:
-            st.caption("You can continue with genres. More ratings make your recommendations more personal.")
-        elif remaining > 0:
-            st.caption(f"Rate {remaining} more movie{'s' if remaining != 1 else ''}, or go back and choose genres.")
+        if genre_mode and not genres_available:
+            st.caption("Go back and choose at least one favorite genre.")
+        elif not genre_mode and remaining > 0:
+            st.caption(f"Rate {remaining} more movie{'s' if remaining != 1 else ''} to continue.")
     submit.button("Get My Recommendations  →", type="primary", width="stretch", disabled=not ready,
                   key="get_recommendations", on_click=go_to, args=(3,))
 
@@ -243,12 +287,19 @@ def recommendations():
     st.html('<p class="eyebrow">PERSONALIZED FOR YOU</p>')
     title, preferences_button, ratings_button = st.columns([2.4, 1, 1])
     title.title("Your Recommendations")
-    preferences_button.button("Update Preferences", key="update_preferences", width="stretch", on_click=go_to, args=(1,))
+    mode = st.session_state.discovery_mode
+    preferences_button.button("Change discovery method", key="update_preferences", width="stretch",
+                              on_click=go_to, args=(0,))
     ratings_button.button("Rate More Movies", type="primary", key="rate_more", width="stretch", on_click=go_to, args=(2,))
-    genres = tuple(st.session_state.favorite_genres)
+    genres = selected_genres()
     ratings = st.session_state.user_ratings
-    st.write("Explore picks based on your selections. Each card explains what influenced the match.")
-    profile = genres, tuple(sorted(ratings.items()))
+    if mode == "movies":
+        st.write("These picks are based on the movies you rated. Each card explains the match.")
+    elif any(rating != 3 for rating in ratings.values()):
+        st.write("These picks use your favorite genres and give more weight to the movies you rated.")
+    else:
+        st.write("These picks are based on the genres you selected.")
+    profile = mode, genres, tuple(sorted(ratings.items()))
     try:
         previous = st.session_state.get("recommendation_result")
         if previous is None or previous[0] != profile:
@@ -281,12 +332,18 @@ def recommendations():
 def main():
     st.set_page_config(page_title="Personalized Movie Recommender", page_icon="🎬", layout="wide")
     st.html(f"<style>{(ROOT / 'assets/styles.css').read_text()}</style>")
-    for key, initial in [("step", 1), ("favorite_genres", []), ("user_ratings", {}),
+    if "discovery_mode" not in st.session_state:
+        st.session_state.discovery_mode = None
+        st.session_state.step = 0
+    for key, initial in [("favorite_genres", []), ("user_ratings", {}),
                          ("skipped_movies", set())]:
         if key not in st.session_state:
             st.session_state[key] = initial
-    header(st.session_state.step)
-    if st.session_state.step in (1, 2):
+    step = st.session_state.step
+    header(step, st.session_state.discovery_mode)
+    if step == 0:
+        discovery()
+    elif step in (1, 2):
         try:
             movies, genres, labels, movie_ids = load_catalog()
         except (OSError, ValueError, KeyError):

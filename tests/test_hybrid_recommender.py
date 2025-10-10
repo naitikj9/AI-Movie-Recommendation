@@ -41,6 +41,20 @@ class HybridTests(unittest.TestCase):
         self.assertTrue(a.hybrid_score.between(0, 1).all())
         pd.testing.assert_frame_equal(a, b)
 
+    def test_favorite_genres_have_a_separate_bounded_share(self):
+        ratings = {10: 5}
+        only_ratings = self.engine.recommend_for_new_user([], ratings).set_index("movieId")
+        mixed = self.engine.recommend_for_new_user(["Comedy"], ratings).set_index("movieId")
+        self.assertTrue(only_ratings.favorite_genre_score.isna().all())
+        for movie_id in [30, 40, 50, 60]:
+            self.assertAlmostEqual(
+                mixed.loc[movie_id, "hybrid_score"],
+                0.75 * only_ratings.loc[movie_id, "hybrid_score"]
+                + 0.25 * mixed.loc[movie_id, "favorite_genre_score"],
+            )
+        self.assertGreater(mixed.loc[30, "hybrid_score"], mixed.loc[40, "hybrid_score"])
+        self.assertIn("You selected Comedy", mixed.loc[40, "explanation"])
+
     def test_dislike_reverses_preference(self):
         liked = self.engine.recommend_for_new_user([], {10: 5}, top_n=6).set_index("movieId")
         disliked = self.engine.recommend_for_new_user([], {10: 0.5}, top_n=6).set_index("movieId")

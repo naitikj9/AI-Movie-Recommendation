@@ -24,6 +24,8 @@ class AppFlowTests(unittest.TestCase):
     def test_genre_navigation_does_not_load_model(self):
         with patch("src.hybrid_recommender.HybridRecommender.from_project") as load_engine:
             app = self.app()
+            app.button(key="choose_genres").click().run()
+            self.assertTrue(app.button(key="continue").disabled)
             app.pills(key="genre_selection").set_value(["Action", "Sci-Fi"]).run()
             app.button(key="continue").click().run()
             self.assertEqual(app.session_state["favorite_genres"], ["Action", "Sci-Fi"])
@@ -36,6 +38,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_choose_edit_skip_and_remove_movie(self):
         app = self.app()
+        app.button(key="choose_genres").click().run()
         app.pills(key="genre_selection").select("Action").run()
         app.button(key="continue").click().run()
         picker = app.selectbox(key="movie_picker")
@@ -70,7 +73,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_ratings_only_requires_five_and_handles_neutral_profile(self):
         app = self.app()
-        app.button(key="continue").click().run()
+        app.button(key="choose_movies").click().run()
         self.assertTrue(app.button(key="get_recommendations").disabled)
         for index, (movie_id, rating) in enumerate(
             [(356, 5.0), (318, 4.5), (296, 4.0), (593, 1.0), (2571, 5.0)], 1
@@ -89,8 +92,37 @@ class AppFlowTests(unittest.TestCase):
         self.assertTrue(any("above or below 3" in item.value for item in app.info))
         self.assertFalse(app.exception)
 
+    def test_switch_modes_uses_only_relevant_inputs(self):
+        app = self.app()
+        self.assertIn("How would you like to", " ".join(item.value for item in app.get("html")))
+        ratings = {356: 5.0, 318: 4.5, 296: 4.0, 593: 1.0, 2571: 5.0}
+        app.session_state["user_ratings"] = ratings
+        app.button(key="choose_genres").click().run()
+        app.pills(key="genre_selection").select("Action").run()
+        app.button(key="continue").click().run()
+        app.button(key="get_recommendations").click().run()
+        profile, results = app.session_state["recommendation_result"]
+        self.assertEqual(profile, ("genres", ("Action",), tuple(sorted(ratings.items()))))
+        self.assertTrue(results.favorite_genre_score.notna().any())
+
+        app.button(key="update_preferences").click().run()
+        app.button(key="choose_movies").click().run()
+        self.assertEqual(app.session_state["favorite_genres"], [])
+        self.assertEqual(app.session_state["user_ratings"], ratings)
+        app.session_state["favorite_genres"] = ["Sci-Fi"]
+        app.button(key="get_recommendations").click().run()
+        profile, results = app.session_state["recommendation_result"]
+        self.assertEqual(profile, ("movies", (), tuple(sorted(ratings.items()))))
+        self.assertTrue(results.favorite_genre_score.isna().all())
+
+        app.button(key="update_preferences").click().run()
+        app.button(key="choose_genres").click().run()
+        self.assertEqual(app.pills(key="genre_selection").value, [])
+        self.assertTrue(app.button(key="continue").disabled)
+
     def test_invalid_retained_movie_id_can_be_removed(self):
         app = self.app()
+        app.button(key="choose_genres").click().run()
         app.session_state["user_ratings"] = {999999: 5.0}
         app.pills(key="genre_selection").select("Action").run()
         app.button(key="continue").click().run()
