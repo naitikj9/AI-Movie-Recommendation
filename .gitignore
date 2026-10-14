@@ -1,0 +1,14 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.keras
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+models/checkpoints/
+models/trained/
