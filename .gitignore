@@ -1,4 +1,5 @@
 .venv/
+.venv.nosync/
 venv/
 __pycache__/
 *.py[cod]
@@ -12,3 +13,7 @@ __pycache__/
 *.joblib
 models/checkpoints/
 models/trained/
+
+# Local API credentials
+.streamlit/secrets.toml
+.env
