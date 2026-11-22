@@ -86,6 +86,12 @@ class HybridTests(unittest.TestCase):
     def test_explanations_and_copy_safety(self):
         result = self.engine.recommend_for_new_user(["Action"], {}, top_n=1)
         self.assertIn("Action", result.iloc[0].explanation)
+        from_rating = self.engine.recommend_for_new_user([], {10: 4.5}, top_n=1).iloc[0]
+        self.assertIn("Your ratings favor Action", from_rating.explanation)
+        self.assertIn("Duplicate (2000), which you rated 4.5/5", from_rating.explanation)
+        content_only = self.engine.recommend_for_new_user([], {10: 4.5}, top_n=1,
+                                                          embedding_weight=0).iloc[0]
+        self.assertNotIn("MovieLens rating patterns", content_only.explanation)
         movies = self.engine.movies
         movies.loc[0, "title"] = "Changed"
         self.assertNotEqual(self.engine.movies.loc[0, "title"], "Changed")

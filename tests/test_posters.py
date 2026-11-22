@@ -70,6 +70,15 @@ class PosterTests(unittest.TestCase):
         self.assertIn('Poster unavailable', card)
         self.assertNotIn('<img', card)
 
+    def test_search_preview_uses_poster_without_rank(self):
+        from app import cover_html
+        with patch("app.movie_poster", return_value="data:image/jpeg;base64,abc") as lookup:
+            preview = cover_html(1, 'Toy Story (1995)')
+        lookup.assert_called_once_with(1)
+        self.assertIn('class="search-cover has-poster"', preview)
+        self.assertIn('alt="Toy Story (1995) poster"', preview)
+        self.assertNotIn('class="rank"', preview)
+
 
 if __name__ == "__main__":
     unittest.main()

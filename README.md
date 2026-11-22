@@ -2,12 +2,14 @@
 
 A graduate class project with a working Streamlit app for **new users**:
 **Preferences → Rate Movies → Recommendations**. Choose genres, search real MovieLens movies,
-add half-star ratings, then explore six personalized recommendations. Genres and ratings persist
-while moving between screens in the same session. They are not saved as an account or to disk.
+rate five watched movies in half-star steps, then explore up to six personalized recommendations.
+Genres, ratings, and skips persist while moving between screens in the same session.
 
 The interface follows the supplied Figma prototype screenshots: near-black backgrounds, coral
-accents, genre tiles, a movie library beside Your Ratings, and a three-column recommendation grid.
-Optional TMDB posters appear when a credential is configured. Decorative placeholders are used
+accents, wrapping genre toggles, a movie picker beside Your Ratings on desktop, and a
+responsive recommendation grid.
+Optional TMDB posters appear in the selected search result preview and in recommendations when
+a credential is configured. Decorative placeholders are used
 when posters are unavailable. No API key, Figma connection, or notebook execution is required
 for the recommender itself.
 
@@ -37,10 +39,9 @@ models/movie_to_index.json            # exact movieId → embedding row
 models/user_to_index.json             # exact userId → embedding row
 ```
 
-Model files are ignored by Git in this project. Copy the saved artifacts separately when moving
-the app to another machine. Do not train a replacement just to launch the UI. Startup checks
-mapping dimensions and gives a setup message if files are missing. The app never calls `fit()`
-or saves, overwrites, or modifies model weights.
+Keep the saved artifacts and CSVs available in the deployed branch. The Preferences and Rate
+Movies screens use the catalog independently of the model. When collaborative recommendations
+first need the model, the loader checks the mappings. The app opens the model for read-only use.
 
 ## How the models work
 
@@ -122,33 +123,52 @@ and/or signed movie-space similarities; they are deterministic and do not use an
 movie-space profile is a **cold-start approximation**, not a new learned user embedding or a rating
 prediction from the original network.
 
-## App code: where to look
+## Usability changes
 
-- `src/hybrid_recommender.py`: artifact loading, ID validation, profiles, scoring, explanations,
-  search, and known-user inference. No Streamlit dependency or mutable per-user state.
-- `app.py`: `load_recommender()` caches the read-only engine with `st.cache_resource`.
-  `preferences()`, `rate_movies()`, and `recommendations()` render the three screens.
-  Callbacks store persistent selections separately from ephemeral widget keys in session state.
-- `assets/styles.css` and `.streamlit/config.toml`: prototype-inspired layout and dark theme.
-- `tests/`: synthetic scoring tests and real-app interaction tests.
+| Finding | Cause and fix | Verification |
+| --- | --- | --- |
+| Genre taps waited for visible feedback | The button style changed after a full script rerun, and a cold session loaded TensorFlow before displaying Preferences. Native genre pills show a selected state on tap, and a Streamlit fragment refreshes the count. A lightweight cached catalog serves onboarding. | Widget tests verify genre selection survives navigation and onboarding never calls the recommender loader. |
+| Finding a watched movie took extra steps | Search was a server-side text field with a capped result list and several rating controls. The picker filters the full MovieLens title list as you type. Identical titles have distinct IDs in their labels. | Widget tests select titles from the full catalog and cover editing and removal. |
+| No way to mark an unwatched movie | The rating menu only offered stars and an empty state. **Haven’t Seen** is stored separately, so a skip contributes neither to the five-rating target nor to either scoring profile. A skipped movie can still be recommended because it is unwatched. | Tests cover skipping, revisiting a skipped title, replacing a skip with a rating, and changing a rating to a skip. |
+| Results were hard to interpret | Cards used generic movie-profile language. Each card now explains selected or inferred genre matches, a named highly rated movie with similar MovieLens rating patterns when supported, or a weaker match. Results are reused within the session for the same inputs. | App tests exercise genre-only and ratings-only results, missing posters, neutral ratings, and invalid IDs. |
+| Desktop layout crowded narrow screens | Fixed genre rows and side-by-side controls reduced usable space. Genre pills wrap, rating controls use larger targets, and cards flow into one, two, or three columns. | See the browser checks below. |
 
-The app encourages five ratings. It also permits an earlier genre-based fallback if at least one
-genre is selected; adding ratings improves the available personalization signals. Ratings-only
-users are asked for five ratings. Unknown/no-result searches and uninformative profiles have clear
-messages. Duplicate titles show a movie ID in the rating screen to distinguish records. Search
-matches literal title or genre text. Results are capped at 12; narrow the query to find a movie.
+With at least one selected genre, visitors can request recommendations before reaching five
+ratings. For a ratings-only request, five numeric ratings unlock recommendations. Five neutral
+ratings give the ranking no preference direction, so the results page asks for a genre or a
+rating above or below three stars.
 
 ## Verification
+
+Run the suite from the project root.
 
 ```bash
 .venv.nosync/bin/python -m unittest discover -s tests -v
 ```
 
-Tests cover genre-only/rating-only/hybrid requests, dislikes, invalid IDs/ratings/weights,
-self-exclusion, missing embeddings/genres, duplicate titles, ranking, result count, and empty
-preferences. UI tests exercise the real saved artifacts without training them. The browser flow
-was also checked visually. Model/data/notebook SHA-256 hashes are checked during integration
-verification to ensure protected files remain unchanged.
+The suite was verified with Python 3.12 and Streamlit 1.65. It exercises the actual saved
+Keras artifact, including known-user predictions, and
+checks model and mapping hashes around those tests. Poster tests use controlled responses to
+cover missing artwork, invalid links, malformed responses, and network failure.
+
+Local Chrome testing covered title search, skipping a movie, and opening genre-based
+recommendations. At 390 px, the first genre count update took about 110 ms. Recommendation
+cards fit without horizontal scrolling at 320, 390, 820, and 1280 px. The deployed app and
+physical iPhone Safari are still to be checked.
+
+Use this checklist after starting locally or pushing the update to the GitHub branch
+connected to Community Cloud.
+
+1. Open a fresh browser session. On iPhone Safari, tap several genres quickly, deselect one,
+   and check that the selected state and count agree. Continue, then go back to verify persistence.
+2. With no genres selected, search for watched movies by partial title, try a title that has no
+   matches, and choose **Haven’t Seen** for one title. Check that the count stays the same and
+   that the results button becomes available after five numeric ratings.
+3. Repeat with a genre and fewer than five ratings. Check the card explanations and verify that
+   rated titles are excluded. On mobile, check for readable controls and no horizontal scrolling.
+4. On Community Cloud, open **Manage app** to check logs for catalog or artifact-loading errors
+   after testing both the genre-only and ratings-only flows.
+   [Streamlit Community Cloud app management](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app)
 
 ## Limitations
 
@@ -159,7 +179,7 @@ biases. Sparse histories and broad genres limit precision, and negative/cancelli
 be uninformative. A single negative rating can produce less-similar suggestions, but that is not
 a substitute for positive preferences. Historical rating counts are biased toward popular movies.
 
-Preferences live only for a browser session; a refresh/reconnect may reset them. Account storage, deployment, and a hybrid evaluation study remain future work.
+Preferences live only for a browser session; a refresh/reconnect may reset them. Account storage and a hybrid evaluation study remain future work.
 Poster availability depends on optional TMDB credentials and network access. MovieLens has its own
 usage conditions; see `data/raw/README.txt`. No notebook or raw-data changes are needed to run.
 

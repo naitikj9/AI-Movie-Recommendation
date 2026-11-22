@@ -1,4 +1,6 @@
 """Streamlit entry point. Run with: python -m streamlit run app.py."""
+from collections import Counter
+import csv
 from html import escape
 from pathlib import Path
 import re
@@ -6,16 +8,33 @@ import os
 
 import streamlit as st
 
-from src.hybrid_recommender import HybridRecommender, PreferenceError
-from src.posters import fetch_poster, load_tmdb_mapping
-
 ROOT = Path(__file__).resolve().parent
-RATING_OPTIONS = [None] + [value / 2 for value in range(1, 11)]
+SKIPPED = "Haven’t Seen"
+RATING_OPTIONS = [SKIPPED] + [value / 2 for value in range(1, 11)]
+RATING_TARGET = 5
 
 
-@st.cache_resource(show_spinner="Opening your movie library…")
-def load_recommender():
-    return HybridRecommender.from_project(ROOT)
+@st.cache_resource(show_spinner=False)
+def load_catalog():
+    with (ROOT / "data/processed/movies_processed.csv").open(newline="", encoding="utf-8") as file:
+        movies = {int(row["movieId"]): (row["title"], row["genres"])
+                  for row in csv.DictReader(file)}
+    if not movies:
+        raise ValueError("The movie catalog is empty.")
+    genres = sorted({genre for _, listed in movies.values() for genre in listed.split("|")
+                     if genre and genre != "(no genres listed)"})
+    title_counts = Counter(title for title, _ in movies.values())
+    labels = {movie_id: f"{title} · Movie {movie_id}" if title_counts[title] > 1 else title
+              for movie_id, (title, _) in movies.items()}
+    movie_ids = sorted(movies, key=lambda movie_id: labels[movie_id].casefold())
+    return movies, genres, labels, movie_ids
+
+
+@st.cache_resource(show_spinner="Preparing your recommendations…")
+def load_recommender(use_embeddings):
+    from src.hybrid_recommender import HybridRecommender
+
+    return HybridRecommender.from_project(ROOT, use_embeddings=use_embeddings)
 
 
 def poster_credentials():
@@ -34,11 +53,15 @@ def poster_credentials():
 
 @st.cache_data(show_spinner=False)
 def poster_mapping():
+    from src.posters import load_tmdb_mapping
+
     return load_tmdb_mapping(ROOT / "data/raw/links.csv")
 
 
 @st.cache_data(ttl=3600, max_entries=1000, show_spinner=False)
 def cached_poster(tmdb_id, api_key, read_token):
+    from src.posters import fetch_poster
+
     # Include credentials in the cache key so configuring/changing a key retries.
     return fetch_poster(tmdb_id, api_key, read_token)
 
@@ -53,43 +76,47 @@ def movie_poster(movie_id):
 
 def cover_html(movie_id, title, rank=None):
     poster = movie_poster(movie_id)
-    mini = rank is None
-    css_class = "mini-cover" if mini else "movie-cover"
-    rank_badge = f'<span class="rank">{rank:02d}</span>' if rank is not None else ""
+    cover_class = "search-cover" if rank is None else "movie-cover"
+    rank_badge = "" if rank is None else f'<span class="rank">{rank:02d}</span>'
     if poster:
-        return (f'<div class="{css_class} has-poster">'
+        return (f'<div class="{cover_class} has-poster">'
                 f'<img src="{poster}" alt="{escape(title, quote=True)} poster" />'
                 f'{rank_badge}</div>')
-    decoration = "▶" if mini else '<span class="cover-mark">▶</span><span class="cover-label">MOVIE NIGHT</span>'
-    return (f'<div class="{css_class} palette-{int(movie_id) % 6}" aria-label="Poster unavailable">'
-            f'{rank_badge}{decoration}</div>')
+    if rank is None:
+        return f'<div class="{cover_class} palette-{int(movie_id) % 6}">Poster unavailable</div>'
+    return (f'<div class="{cover_class} palette-{int(movie_id) % 6}">'
+            f'{rank_badge}<span class="cover-mark" aria-hidden="true">▶</span>'
+            '<span class="cover-label">Poster unavailable</span></div>')
 
 
 def go_to(step):
     st.session_state.step = step
 
 
-def toggle_genre(genre):
-    selected = set(st.session_state.favorite_genres)
-    selected.symmetric_difference_update({genre})
-    st.session_state.favorite_genres = sorted(selected)
+def save_genres():
+    st.session_state.favorite_genres = sorted(st.session_state.genre_selection)
 
 
 def save_rating(movie_id, widget_key):
     value = st.session_state[widget_key]
-    if value is None:
-        st.session_state.user_ratings.pop(movie_id, None)
+    ratings = st.session_state.user_ratings
+    skipped = st.session_state.skipped_movies
+    if value == SKIPPED:
+        ratings.pop(movie_id, None)
+        skipped.add(movie_id)
     else:
-        st.session_state.user_ratings[movie_id] = float(value)
-
-
-def save_search():
-    st.session_state.search_query = st.session_state.movie_search
+        skipped.discard(movie_id)
+        if value is None:
+            ratings.pop(movie_id, None)
+        else:
+            ratings[movie_id] = value
+    other_prefix = "rate" if widget_key.startswith("edit_") else "edit"
+    st.session_state.pop(f"{other_prefix}_{movie_id}", None)
 
 
 def remove_rating(movie_id):
     st.session_state.user_ratings.pop(movie_id, None)
-    for prefix in ["rate", "edit"]:
+    for prefix in ("rate", "edit"):
         st.session_state.pop(f"{prefix}_{movie_id}", None)
 
 
@@ -103,8 +130,8 @@ def genre_label(genres):
 
 
 def rating_label(value):
-    if value is None:
-        return "Choose a rating"
+    if value == SKIPPED:
+        return SKIPPED
     return f"{'★' * int(value)}{'½' if value % 1 else ''}  {value:g} / 5"
 
 
@@ -119,158 +146,158 @@ def header(step):
     st.html('<nav aria-label="Recommendation progress" class="stepper">' + '<i></i>'.join(items) + '</nav>')
 
 
-def preferences(recommender):
+@st.fragment
+def genre_picker(genres):
+    with st.container(border=True, key="genre_panel"):
+        st.subheader("What do you love to watch?")
+        st.caption("Select as many as you like.")
+        selected = st.pills("Favorite genres", genres, selection_mode="multi",
+                            default=st.session_state.favorite_genres, key="genre_selection",
+                            on_change=save_genres, label_visibility="collapsed", wrap=True)
+        st.html(f'<span class="selection-count" role="status">{len(selected)} selected</span>')
+
+
+def preferences(genres):
     st.html('''<section class="hero"><p class="eyebrow">CURATED FOR YOU</p>
     <h1>Find Your Next <span>Favorite Movie</span></h1>
     <p>Tell us what you like and we’ll create movie recommendations personalized for you.</p></section>''')
-    with st.container(border=True, key="genre_panel"):
-        title, count = st.columns([4, 1])
-        with title:
-            st.subheader("What do you love to watch?")
-            st.caption("Select as many as you like. You can update these later.")
-        with count:
-            st.html(f'<span class="selection-count">{len(st.session_state.favorite_genres)} selected</span>')
-        genres = recommender.genres
-        for start in range(0, len(genres), 4):
-            for column, genre in zip(st.columns(4), genres[start:start + 4]):
-                selected = genre in st.session_state.favorite_genres
-                column.button(f"{'✓' if selected else '＋'}  {genre}", key=f"genre_{genre}",
-                              type="primary" if selected else "secondary", width="stretch",
-                              on_click=toggle_genre, args=(genre,))
+    genre_picker(genres)
     _, next_column = st.columns([4, 1])
     next_column.button("Continue  →", type="primary", width="stretch", key="continue",
                        on_click=go_to, args=(2,))
-    if not st.session_state.favorite_genres:
-        st.caption("You can also start with movie ratings instead of genres.")
+    st.caption("You can also start with movie ratings instead of genres.")
 
 
-def rating_control(movie_id, prefix, value=None):
+def rating_control(movie_id, prefix, label):
     key = f"{prefix}_{movie_id}"
+    current = (SKIPPED if movie_id in st.session_state.skipped_movies
+               else st.session_state.user_ratings.get(movie_id))
     if key not in st.session_state:
-        st.session_state[key] = value
-    st.selectbox("Your rating", RATING_OPTIONS, key=key, format_func=rating_label,
+        st.session_state[key] = current
+    st.selectbox(label, RATING_OPTIONS, index=None, key=key, format_func=rating_label,
+                 placeholder="Choose a rating",
                  on_change=save_rating, args=(movie_id, key))
 
 
-def rate_movies(recommender):
-    heading, progress = st.columns([4, 1])
+def rate_movies(movies, labels, movie_ids):
     count = len(st.session_state.user_ratings)
-    with heading:
-        st.html('<p class="eyebrow">STEP 2 OF 3</p>')
-        st.title("Rate Movies You’ve Seen")
-        st.write("Rate a few movies you’ve watched so we can better understand your preferences.")
-        st.caption("Aim for at least 5 movies. Half-star ratings are welcome.")
-    with progress:
-        with st.container(border=True):
-            st.subheader(f"{count} of 5")
-            st.caption("movies rated")
-            st.progress(min(count / 5, 1.0))
+    remaining = RATING_TARGET - count
+    st.html('<p class="eyebrow">STEP 2 OF 3</p>')
+    st.title("Rate Movies You’ve Seen")
+    st.write("Search for five movies you’ve watched and give each a rating. Half stars are welcome.")
+    progress = (f"{count} of {RATING_TARGET} movies rated" if remaining > 0
+                else f"{count} movies rated · goal reached")
+    st.progress(min(count / RATING_TARGET, 1.0), text=progress)
     library, ratings_panel = st.columns([2.1, 1], gap="large")
     with library:
         with st.container(border=True, key="rating_library"):
-            if "movie_search" not in st.session_state:
-                st.session_state.movie_search = st.session_state.search_query
-            query = st.text_input("Find a movie", placeholder="Search by movie title or genre",
-                                  key="movie_search", on_change=save_search)
-            st.markdown("#### Search results" if query.strip() else "#### Suggested movies")
-            search = recommender.search_movies(query, limit=12 if query.strip() else 6)
-            if search.empty:
-                st.info("No movies found. Try a shorter title or a genre.")
-            for movie in search.itertuples():
-                title, year = title_parts(movie.title)
-                details, control = st.columns([1.6, 1])
-                with details:
-                    st.html(f'<div class="library-movie">{cover_html(movie.movieId, movie.title)}'
-                            f'<div><h4>{escape(title)}</h4><p>{escape(year)} · {escape(genre_label(movie.genres))}</p>'
-                            f'<small>Movie ID {movie.movieId}</small></div></div>')
-                with control:
-                    # Rated movies are edited in one place to avoid conflicting widget values.
-                    if movie.movieId in st.session_state.user_ratings:
-                        st.caption(f"Rated {st.session_state.user_ratings[movie.movieId]:g} ★ — edit in Your Ratings")
+            movie_id = st.selectbox("Find a movie", movie_ids, index=None, key="movie_picker", persist_state="session",
+                                    format_func=labels.__getitem__, filter_mode="contains",
+                                    placeholder="Type a movie title or year")
+            if movie_id is not None:
+                if movie_id not in movies:
+                    st.warning("This movie is unavailable. Choose another title.")
+                else:
+                    title, genres = movies[movie_id]
+                    st.html(f'<div class="search-preview">{cover_html(movie_id, title)}'
+                            f'<div><strong>{escape(labels[movie_id])}</strong>'
+                            f'<p>{escape(genre_label(genres))}</p></div></div>')
+                    if movie_id in st.session_state.user_ratings:
+                        st.caption("Already rated. You can change it in Your Ratings.")
                     else:
-                        rating_control(movie.movieId, "rate")
-                st.divider()
+                        rating_control(movie_id, "rate", "Your rating")
+                        if movie_id in st.session_state.skipped_movies:
+                            st.caption("Skipped. Search for another movie to keep going.")
     with ratings_panel:
         with st.container(border=True, key="your_ratings"):
             st.subheader("Your Ratings")
-            st.caption(f"{count} total")
             if not count:
-                st.caption("Your rated movies will appear here. Choose a rating to add one.")
-            movie_lookup = recommender.movies.set_index("movieId")
-            for movie_id, rating in list(st.session_state.user_ratings.items()):
-                movie = movie_lookup.loc[movie_id]
-                title, year = title_parts(movie.title)
-                st.markdown(f"**{title}**")
-                st.caption(f"{year} · {genre_label(movie.genres)} · Movie ID {movie_id}")
-                rating_control(movie_id, "edit", rating)
-                st.button("Remove", key=f"remove_{movie_id}", on_click=remove_rating, args=(movie_id,))
+                st.caption("Your ratings will appear here.")
+            for movie_id in list(st.session_state.user_ratings):
+                if movie_id not in movies:
+                    st.warning(f"Movie {movie_id} is unavailable.")
+                else:
+                    _, genres = movies[movie_id]
+                    st.text(labels[movie_id])
+                    st.caption(genre_label(genres))
+                    rating_control(movie_id, "edit", f"Change rating for {labels[movie_id]}")
+                st.button("Remove rating", key=f"remove_{movie_id}", on_click=remove_rating,
+                          args=(movie_id,))
                 st.divider()
     st.divider()
     back, note, submit = st.columns([1, 2.4, 1.6])
     back.button("←  Back", key="back", on_click=go_to, args=(1,))
     genres_available = bool(st.session_state.favorite_genres)
-    ready = count >= 5 or genres_available
+    ready = remaining <= 0 or genres_available
     with note:
-        if count < 5 and genres_available:
+        if remaining > 0 and genres_available:
             st.caption("You can continue with genres. More ratings make your recommendations more personal.")
-        elif count < 5:
-            st.caption(f"Rate {5 - count} more movie{'s' if 5-count != 1 else ''}, or go back and choose genres.")
+        elif remaining > 0:
+            st.caption(f"Rate {remaining} more movie{'s' if remaining != 1 else ''}, or go back and choose genres.")
     submit.button("Get My Recommendations  →", type="primary", width="stretch", disabled=not ready,
                   key="get_recommendations", on_click=go_to, args=(3,))
 
 
-def recommendations(recommender):
+def recommendations():
+    from src.hybrid_recommender import PreferenceError
     st.html('<p class="eyebrow">PERSONALIZED FOR YOU</p>')
     title, preferences_button, ratings_button = st.columns([2.4, 1, 1])
     title.title("Your Recommendations")
     preferences_button.button("Update Preferences", key="update_preferences", width="stretch", on_click=go_to, args=(1,))
     ratings_button.button("Rate More Movies", type="primary", key="rate_more", width="stretch", on_click=go_to, args=(2,))
-    count = len(st.session_state.user_ratings)
-    rated_context = f" and the {count} movie{'s' if count != 1 else ''} you rated" if count else ""
-    st.write(f"Movies selected based on your preferences{rated_context}.")
+    genres = tuple(st.session_state.favorite_genres)
+    ratings = st.session_state.user_ratings
+    st.write("Explore picks based on your selections. Each card explains what influenced the match.")
+    profile = genres, tuple(sorted(ratings.items()))
     try:
-        results = recommender.recommend_for_new_user(
-            st.session_state.favorite_genres, st.session_state.user_ratings, top_n=6
-        )
+        previous = st.session_state.get("recommendation_result")
+        if previous is None or previous[0] != profile:
+            use_embeddings = any(rating != 3 for rating in ratings.values())
+            results = load_recommender(use_embeddings).recommend_for_new_user(genres, ratings, top_n=6)
+            st.session_state.recommendation_result = (profile, results)
+        else:
+            results = previous[1]
     except PreferenceError as error:
         st.info(str(error))
+        return
+    except (OSError, ValueError, ImportError, KeyError):
+        st.error("We couldn’t prepare recommendations. Check that the MovieLens files and saved model are available.")
         return
     if results.empty:
         st.info("No unrated matches remain. Try updating your preferences.")
         return
-    for start in range(0, len(results), 3):
-        for column, (_, movie) in zip(st.columns(3, gap="large"), results.iloc[start:start + 3].iterrows()):
-            title_text, year = title_parts(movie.title)
-            rank = int(movie.name) + 1
-            with column:
-                st.html(f'''<article class="movie-card">
-                {cover_html(movie.movieId, movie.title, rank)}
-                <div class="card-content"><h3>{escape(title_text)}</h3>
-                <p class="metadata">{escape(year)} · {escape(genre_label(movie.genres))}</p>
-                <div class="explanation"><span>ⓘ</span> {escape(movie.explanation)}</div></div></article>''')
-    st.caption("Movie posters appear when available; decorative artwork is used otherwise. Recommendations are suggestions based on your taste.")
+    cards = []
+    for rank, movie in enumerate(results.itertuples(), 1):
+        title_text, year = title_parts(movie.title)
+        cards.append(f'''<article class="movie-card">
+            {cover_html(movie.movieId, movie.title, rank)}
+            <div class="card-content"><h3>{escape(title_text)}</h3>
+            <p class="metadata">{escape(year)} · {escape(genre_label(movie.genres))}</p>
+            <p class="explanation"><strong>Why this movie?</strong> {escape(movie.explanation)}</p>
+            </div></article>''')
+    st.html('<div class="movie-grid">' + ''.join(cards) + '</div>')
 
 
 def main():
     st.set_page_config(page_title="Personalized Movie Recommender", page_icon="🎬", layout="wide")
     st.html(f"<style>{(ROOT / 'assets/styles.css').read_text()}</style>")
-    for key, initial in [("step", 1), ("favorite_genres", []), ("user_ratings", {}), ("search_query", "")]:
+    for key, initial in [("step", 1), ("favorite_genres", []), ("user_ratings", {}),
+                         ("skipped_movies", set())]:
         if key not in st.session_state:
             st.session_state[key] = initial
     header(st.session_state.step)
-    try:
-        recommender = load_recommender()
-    except (OSError, ValueError, ImportError, KeyError) as error:
-        st.error("We couldn’t open the movie library. Check that the saved model, mappings, and MovieLens files are installed.")
-        with st.expander("Setup details"):
-            st.code(str(error))
-        st.stop()
-    if st.session_state.step == 1:
-        preferences(recommender)
-    elif st.session_state.step == 2:
-        rate_movies(recommender)
+    if st.session_state.step in (1, 2):
+        try:
+            movies, genres, labels, movie_ids = load_catalog()
+        except (OSError, ValueError, KeyError):
+            st.error("We couldn’t open the movie catalog. Check that the processed MovieLens catalog is installed.")
+            return
+        if st.session_state.step == 1:
+            preferences(genres)
+        else:
+            rate_movies(movies, labels, movie_ids)
     else:
-        recommendations(recommender)
+        recommendations()
     with st.expander("Credits"):
         logo = ROOT / "assets/tmdb-logo.svg"
         if logo.exists():

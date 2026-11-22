@@ -9,7 +9,6 @@ from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
 
 
@@ -94,13 +93,16 @@ class HybridRecommender:
             array.setflags(write=False)
 
     @classmethod
-    def from_project(cls, root):
+    def from_project(cls, root, *, use_embeddings=True):
         """Load saved artifacts once; the caller can cache this resource."""
-        from tensorflow import keras
-
         root = Path(root)
         movies = pd.read_csv(root / "data/processed/movies_processed.csv")
         ratings = pd.read_csv(root / "data/raw/ratings.csv", usecols=["userId", "movieId", "rating"])
+        if not use_embeddings:
+            return cls(movies, {}, np.empty((0, 0)), ratings=ratings)
+
+        from tensorflow import keras
+
         movie_mapping = json.loads((root / "models/movie_to_index.json").read_text())
         user_mapping = json.loads((root / "models/user_to_index.json").read_text())
         model = keras.models.load_model(root / "models/movie_recommender.keras", compile=False)
@@ -195,9 +197,9 @@ class HybridRecommender:
         content_raw = np.zeros(len(self._movies))
         embedding_raw = np.zeros(len(self._movies))
         if has_content:
-            content_raw = cosine_similarity(self._genre_features, content_profile.reshape(1, -1)).ravel()
+            content_raw = self._genre_units @ (content_profile / np.linalg.norm(content_profile))
         if has_embedding:
-            embedding_raw = cosine_similarity(self._embedding_features, embedding_profile.reshape(1, -1)).ravel()
+            embedding_raw = self._embedding_units @ (embedding_profile / np.linalg.norm(embedding_profile))
         content_available = has_content & (self._genre_features.sum(axis=1) > 0)
         embedding_available = has_embedding & self._has_embedding
         content_score = np.clip((content_raw + 1) / 2, 0, 1)
@@ -217,20 +219,31 @@ class HybridRecommender:
         results = results[eligible].sort_values(
             ["hybrid_score", "rating_count", "movieId"], ascending=[False, False, True]
         ).head(top_n).copy()
+        liked_with_embeddings = [(self._positions[mid], rating) for mid, rating in ratings.items()
+                                 if rating > 3 and self._has_embedding[self._positions[mid]]]
         explanations = []
         for movie_id in results.movieId:
             row = self._positions[movie_id]
             matching = [g for g in self._genre_lists.iloc[row]
-                        if content_profile[self._genre_columns[g]] > 0]
+                        if content_profile[self._genre_columns[g]] > 1e-12]
+            selected = [g for g in matching if g in genres]
+            learned = [g for g in matching if g not in genres]
             parts = []
-            if weights[0] > 0 and content_raw[row] > 1e-12 and matching:
-                parts.append("Matches your interest in " + " and ".join(matching[:2]))
+            if weights[0] > 0 and content_raw[row] > 1e-12:
+                if selected:
+                    parts.append("You selected " + " and ".join(selected[:2]) + " as favorite genres.")
+                if learned:
+                    parts.append("Your ratings favor " + " and ".join(learned[:2]) + " movies.")
             if weights[1] > 0 and embedding_available[row] and embedding_raw[row] > 1e-12:
-                if any(r > 3 and self._has_embedding[self._positions[mid]] for mid, r in ratings.items()):
-                    parts.append("Similar to the movie profile from your ratings")
+                similar = [(float(self._embedding_units[row] @ self._embedding_units[liked_row]),
+                            rating, liked_row) for liked_row, rating in liked_with_embeddings]
+                if similar and max(similar)[0] > 1e-12:
+                    _, rating, liked_row = max(similar)
+                    parts.append(f"MovieLens rating patterns are similar to those for "
+                                 f"{self._movies.title.iloc[liked_row]}, which you rated {rating:g}/5.")
                 else:
-                    parts.append("Less similar to movies you rated poorly")
-            explanations.append(". ".join(parts) + "." if parts else "Selected from your overall preference profile.")
+                    parts.append("It fits the broader MovieLens patterns from your ratings.")
+            explanations.append(" ".join(parts) or "This is a weaker match for your overall preferences.")
         results["explanation"] = explanations
         return results.reset_index(drop=True)
 
