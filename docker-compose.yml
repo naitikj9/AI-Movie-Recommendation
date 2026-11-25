@@ -1,0 +1,10 @@
+services:
+  movie-recommender:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      # Optional, for movie posters. Compose reads these from .env (see .env.example).
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TMDB_READ_ACCESS_TOKEN: ${TMDB_READ_ACCESS_TOKEN:-}
+    restart: unless-stopped

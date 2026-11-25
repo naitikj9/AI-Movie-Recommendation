@@ -1,0 +1,15 @@
+.git
+.venv
+.venv.nosync
+venv
+.claude
+.vscode
+**/__pycache__
+**/*.py[cod]
+notebooks
+tests
+models
+
+# Credentials must never be copied into an image.
+.env
+.streamlit/secrets.toml
