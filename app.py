@@ -8,15 +8,20 @@ import os
 
 import streamlit as st
 
+from src.discovery import ALL_ERAS, ERAS, MOODS, watchlist_csv
+
 ROOT = Path(__file__).resolve().parent
 SKIPPED = "Haven’t Seen"
 RATING_OPTIONS = [SKIPPED] + [value / 2 for value in range(1, 11)]
 RATING_TARGET = 5
+CATALOG = ROOT / "data/bollywood/movies.csv"
+# Share of the score given to popularity, so equal genre matches do not all tie.
+POPULARITY_WEIGHT = 0.3
 
 
 @st.cache_resource(show_spinner=False)
 def load_catalog():
-    with (ROOT / "data/processed/movies_processed.csv").open(newline="", encoding="utf-8") as file:
+    with CATALOG.open(newline="", encoding="utf-8") as file:
         movies = {int(row["movieId"]): (row["title"], row["genres"])
                   for row in csv.DictReader(file)}
     if not movies:
@@ -31,10 +36,10 @@ def load_catalog():
 
 
 @st.cache_resource(show_spinner="Preparing your recommendations…")
-def load_recommender(use_embeddings):
+def load_recommender():
     from src.hybrid_recommender import HybridRecommender
 
-    return HybridRecommender.from_project(ROOT, use_embeddings=use_embeddings)
+    return HybridRecommender.from_bollywood(ROOT)
 
 
 def poster_credentials():
@@ -55,7 +60,7 @@ def poster_credentials():
 def poster_mapping():
     from src.posters import load_tmdb_mapping
 
-    return load_tmdb_mapping(ROOT / "data/raw/links.csv")
+    return load_tmdb_mapping(CATALOG)
 
 
 @st.cache_data(ttl=3600, max_entries=1000, show_spinner=False)
@@ -98,6 +103,7 @@ def choose_mode(mode):
         st.session_state.pop("recommendation_result", None)
         st.session_state.favorite_genres = []
         st.session_state.pop("genre_selection", None)
+        st.session_state.pop("mood_selection", None)
     st.session_state.discovery_mode = mode
     go_to(2 if mode == "movies" else 1)
 
@@ -108,6 +114,16 @@ def selected_genres():
 
 def save_genres():
     st.session_state.favorite_genres = sorted(st.session_state.genre_selection)
+    # A manual change means the genres may no longer match the chosen mood.
+    st.session_state.mood_selection = None
+
+
+def apply_mood(available):
+    mood = st.session_state.mood_selection
+    if mood:
+        chosen = sorted(genre for genre in MOODS[mood] if genre in available)
+        st.session_state.genre_selection = chosen
+        st.session_state.favorite_genres = chosen
 
 
 def save_rating(movie_id, widget_key):
@@ -150,9 +166,9 @@ def rating_label(value):
 
 def header(step, mode):
     st.html('''<header class="brand-bar"><div class="brand"><span class="brand-icon">▶</span>
-    <div><strong>PERSONALIZED</strong><span>Movie Recommender</span></div></div>
+    <div><strong>PERSONALIZED</strong><span>Bollywood Recommender</span></div></div>
     <span class="brand-tag">Your next favorite is waiting</span></header>''')
-    if step == 0:
+    if step in (0, 4, 5):
         return
     stages = [(1, "Preferences"), (2, "Rate Movies"), (3, "Recommendations")]
     if mode == "movies":
@@ -166,8 +182,8 @@ def header(step, mode):
 
 def discovery():
     st.html('''<section class="hero"><p class="eyebrow">CURATED FOR YOU</p>
-    <h1>How would you like to <span>discover movies</span>?</h1></section>''')
-    movies, genres = st.columns(2, gap="large")
+    <h1>How would you like to <span>discover Bollywood movies</span>?</h1></section>''')
+    movies, genres, group = st.columns(3, gap="large")
     with movies, st.container(border=True, key="discovery_movies"):
         st.subheader("Based on movies I've watched")
         st.write("Search for and rate five movies you’ve seen. Your ratings alone guide your recommendations.")
@@ -178,15 +194,25 @@ def discovery():
         st.write("Choose the genres you enjoy. If you add movie ratings, they’ll have more influence on your picks.")
         st.button("Start with favorite genres", key="choose_genres", type="primary", width="stretch",
                   on_click=choose_mode, args=("genres",))
+    with group, st.container(border=True, key="discovery_group"):
+        st.subheader("Watching with friends")
+        st.write("Two or three people share their taste and get movies picked for the whole group.")
+        st.button("Start group picks", key="choose_group", type="primary", width="stretch",
+                  on_click=go_to, args=(4,))
 
 
 @st.fragment
 def genre_picker(genres):
+    if "genre_selection" not in st.session_state:
+        st.session_state.genre_selection = list(st.session_state.favorite_genres)
     with st.container(border=True, key="genre_panel"):
+        st.subheader("What’s your mood?")
+        st.caption("Pick a mood to fill in the genres, or choose genres yourself.")
+        st.pills("Mood", list(MOODS), key="mood_selection", on_change=apply_mood, args=(genres,),
+                 label_visibility="collapsed", wrap=True)
         st.subheader("What do you love to watch?")
         st.caption("Select as many as you like.")
-        selected = st.pills("Favorite genres", genres, selection_mode="multi",
-                            default=st.session_state.favorite_genres, key="genre_selection",
+        selected = st.pills("Favorite genres", genres, selection_mode="multi", key="genre_selection",
                             on_change=save_genres, label_visibility="collapsed", wrap=True)
         st.html(f'<span class="selection-count" role="status">{len(selected)} selected</span>')
     back, next_column = st.columns([3, 1])
@@ -282,6 +308,171 @@ def rate_movies(movies, labels, movie_ids):
                   key="get_recommendations", on_click=go_to, args=(3,))
 
 
+def score_bars(rows):
+    """Render (label, value from 0 to 1, text) rows as labelled bars."""
+    return "".join(
+        f'<div class="score-row"><span>{escape(label)}</span><b>{escape(text)}</b>'
+        f'<i><em style="width:{min(max(value, 0), 1) * 100:.1f}%"></em></i></div>'
+        for label, value, text in rows)
+
+
+def score_breakdown(movie):
+    parts = [("Your favorite genres", movie.favorite_part),
+             ("Genres in your ratings", movie.genre_part),
+             ("Neutral (no rating signal)", movie.neutral_part),
+             ("Popularity", movie.popularity_part)]
+    rows = [(label, value, f"{value * 100:.1f}") for label, value in parts if value > 0]
+    pages = f"Popularity is based on Wikipedia and sister-site pages: {movie.sitelinks}."
+    return (f'<details class="breakdown"><summary>Score breakdown: {movie.hybrid_score * 100:.1f} / 100</summary>'
+            f'{score_bars(rows)}<p>{pages}</p>'
+            '<p>These are ranking points, not a probability or a predicted star rating.</p></details>')
+
+
+def movie_card(movie, rank, body):
+    title_text, year = title_parts(movie.title)
+    return (f'<article class="movie-card">{cover_html(movie.movieId, movie.title, rank)}'
+            f'<div class="card-content"><h3>{escape(title_text)}</h3>'
+            f'<p class="metadata">{escape(year)} · {escape(genre_label(movie.genres))}</p>'
+            f'{body}</div></article>')
+
+
+def era_picker(key):
+    return st.selectbox("Release era", list(ERAS), key=key, persist_state="session")
+
+
+def era_ids(engine, era):
+    from src.discovery import ids_in_era
+
+    return ids_in_era(engine.movies, era)
+
+
+def show_cards(results, bodies, prefix):
+    """Cards in rows of three, each with its watchlist button."""
+    rows = list(zip(results.itertuples(), bodies))
+    for start in range(0, len(rows), 3):
+        columns = st.columns(3, gap="medium")
+        for offset, (column, (movie, body)) in enumerate(zip(columns, rows[start:start + 3])):
+            with column:
+                st.html(movie_card(movie, start + offset + 1, body))
+                watchlist_button(int(movie.movieId), prefix)
+
+
+def toggle_watchlist(movie_id):
+    saved = st.session_state.watchlist
+    if movie_id in saved:
+        saved.remove(movie_id)
+    else:
+        saved.append(movie_id)
+
+
+def watchlist_button(movie_id, prefix):
+    saved = movie_id in st.session_state.watchlist
+    st.button("✓ Saved · Remove" if saved else "＋ Add to watchlist", key=f"{prefix}_watch_{movie_id}",
+              on_click=toggle_watchlist, args=(movie_id,), width="stretch")
+
+
+def open_watchlist():
+    st.session_state.watchlist_return = st.session_state.step
+    go_to(5)
+
+
+def watchlist_page(movies):
+    st.html('<p class="eyebrow">SAVED FOR LATER</p>')
+    st.title("Your Watchlist")
+    st.button("←  Back", key="watchlist_back", on_click=go_to,
+              args=(st.session_state.get("watchlist_return", 0),))
+    saved = [movie_id for movie_id in st.session_state.watchlist if movie_id in movies]
+    if not saved:
+        st.info("Nothing saved yet. Use “Add to watchlist” on any recommendation.")
+        return
+    st.caption("The watchlist lasts for this browser session. Download it to keep a copy.")
+    st.download_button("Download as CSV", watchlist_csv([movies[movie_id] for movie_id in saved]),
+                       file_name="bollywood_watchlist.csv", mime="text/csv", key="watchlist_download")
+    for movie_id in saved:
+        title, genres = movies[movie_id]
+        with st.container(border=True):
+            details, action = st.columns([3, 1])
+            details.text(title)
+            details.caption(genre_label(genres))
+            with action:
+                watchlist_button(movie_id, "list")
+
+
+def group_member(index, genres, labels, movie_ids):
+    with st.container(border=True, key=f"group_member_{index}"):
+        name = st.text_input("Name", value=f"Person {index + 1}", key=f"group_name_{index}",
+                             max_chars=20, persist_state="session")
+        liked_genres = st.multiselect("Favorite genres", genres, key=f"group_genres_{index}",
+                                      persist_state="session")
+        picked = st.multiselect("Movies watched", movie_ids, format_func=labels.__getitem__,
+                                key=f"group_movies_{index}", max_selections=10,
+                                filter_mode="contains", placeholder="Type a movie title",
+                                persist_state="session")
+        ratings = {
+            movie_id: st.selectbox(f"Rating for {labels[movie_id]}", RATING_OPTIONS[1:], index=7,
+                                   format_func=rating_label, key=f"group_rating_{index}_{movie_id}",
+                                   persist_state="session")
+            for movie_id in picked
+        }
+    return {"name": name.strip(), "genres": liked_genres, "ratings": ratings}
+
+
+def group_recommendations(genres, labels, movie_ids):
+    from src.group_recommender import recommend_for_group
+    from src.hybrid_recommender import PreferenceError
+
+    st.html('<p class="eyebrow">GROUP PICKS</p>')
+    st.title("Find a Movie for Everyone")
+    st.write("Each person adds favorite genres, rated movies, or both.")
+    st.button("←  Back", key="group_back", on_click=go_to, args=(0,))
+    size = st.radio("How many people?", [2, 3], horizontal=True, key="group_size",
+                    persist_state="session")
+    members = []
+    for index, column in enumerate(st.columns(size, gap="medium")):
+        with column:
+            members.append(group_member(index, genres, labels, movie_ids))
+    strategy_labels = {"average": "Best for the group on average",
+                       "least_misery": "Keep everyone happy (protect the lowest match)"}
+    strategy = st.radio("How should we choose?", list(strategy_labels),
+                        format_func=strategy_labels.__getitem__, key="group_strategy",
+                        persist_state="session")
+    era = era_picker("group_era")
+    ready = all(member["genres"] or any(value != 3 for value in member["ratings"].values())
+                for member in members)
+    if not ready:
+        st.caption("Every person needs a genre, or a rating above or below 3 stars.")
+    profile = (strategy, era, tuple((member["name"], tuple(member["genres"]),
+                                tuple(sorted(member["ratings"].items()))) for member in members))
+    if st.button("Get Group Recommendations  →", type="primary", disabled=not ready, key="group_submit"):
+        try:
+            engine = load_recommender()
+            results = recommend_for_group(engine, members, top_n=6, strategy=strategy,
+                                          popularity_weight=POPULARITY_WEIGHT,
+                                          allowed_ids=era_ids(engine, era))
+            st.session_state.group_result = (profile, results)
+        except PreferenceError as error:
+            st.info(str(error))
+            return
+        except (OSError, ValueError, ImportError, KeyError):
+            st.error("We couldn’t prepare recommendations. Check that the Bollywood catalog is available.")
+            return
+    previous = st.session_state.get("group_result")
+    if previous is None or previous[0] != profile:
+        return
+    results = previous[1]
+    if results.empty:
+        st.info("No movie can be scored for everyone. Try different genres, ratings, or years.")
+        return
+    bodies = []
+    for movie in results.itertuples():
+        rows = [(name, value, f"{value * 100:.0f}") for name, value in movie.member_scores.items()]
+        body = ('<div class="breakdown"><strong>Match for each person</strong>'
+                f'{score_bars(rows)}'
+                '<p>Percentile among movies scored for the whole group. Higher is a better match.</p></div>')
+        bodies.append(body)
+    show_cards(results, bodies, "group")
+
+
 def recommendations():
     from src.hybrid_recommender import PreferenceError
     st.html('<p class="eyebrow">PERSONALIZED FOR YOU</p>')
@@ -299,12 +490,15 @@ def recommendations():
         st.write("These picks use your favorite genres and give more weight to the movies you rated.")
     else:
         st.write("These picks are based on the genres you selected.")
-    profile = mode, genres, tuple(sorted(ratings.items()))
+    era = era_picker("result_era")
+    profile = mode, genres, tuple(sorted(ratings.items())), era
     try:
         previous = st.session_state.get("recommendation_result")
         if previous is None or previous[0] != profile:
-            use_embeddings = any(rating != 3 for rating in ratings.values())
-            results = load_recommender(use_embeddings).recommend_for_new_user(genres, ratings, top_n=6)
+            engine = load_recommender()
+            results = engine.recommend_for_new_user(
+                genres, ratings, top_n=6, popularity_weight=POPULARITY_WEIGHT,
+                allowed_ids=era_ids(engine, era))
             st.session_state.recommendation_result = (profile, results)
         else:
             results = previous[1]
@@ -312,21 +506,16 @@ def recommendations():
         st.info(str(error))
         return
     except (OSError, ValueError, ImportError, KeyError):
-        st.error("We couldn’t prepare recommendations. Check that the MovieLens files and saved model are available.")
+        st.error("We couldn’t prepare recommendations. Check that the Bollywood catalog is available.")
         return
     if results.empty:
-        st.info("No unrated matches remain. Try updating your preferences.")
+        st.info("No unrated matches remain. Try another era or update your preferences.")
         return
-    cards = []
-    for rank, movie in enumerate(results.itertuples(), 1):
-        title_text, year = title_parts(movie.title)
-        cards.append(f'''<article class="movie-card">
-            {cover_html(movie.movieId, movie.title, rank)}
-            <div class="card-content"><h3>{escape(title_text)}</h3>
-            <p class="metadata">{escape(year)} · {escape(genre_label(movie.genres))}</p>
-            <p class="explanation"><strong>Why this movie?</strong> {escape(movie.explanation)}</p>
-            </div></article>''')
-    st.html('<div class="movie-grid">' + ''.join(cards) + '</div>')
+    show_cards(results, [
+        f'<p class="explanation"><strong>Why this movie?</strong> {escape(movie.explanation)}</p>'
+        f'{score_breakdown(movie)}'
+        for movie in results.itertuples()
+    ], "result")
 
 
 def main():
@@ -336,26 +525,37 @@ def main():
         st.session_state.discovery_mode = None
         st.session_state.step = 0
     for key, initial in [("favorite_genres", []), ("user_ratings", {}),
-                         ("skipped_movies", set())]:
+                         ("skipped_movies", set()), ("watchlist", [])]:
         if key not in st.session_state:
             st.session_state[key] = initial
     step = st.session_state.step
     header(step, st.session_state.discovery_mode)
+    if step != 5:
+        # Filled after the page runs, so the count reflects clicks made on this run.
+        watchlist_slot = st.empty()
     if step == 0:
         discovery()
-    elif step in (1, 2):
+    elif step in (1, 2, 4, 5):
         try:
             movies, genres, labels, movie_ids = load_catalog()
         except (OSError, ValueError, KeyError):
-            st.error("We couldn’t open the movie catalog. Check that the processed MovieLens catalog is installed.")
+            st.error("We couldn’t open the movie catalog. Run scripts/fetch_bollywood.py to create it.")
             return
-        if st.session_state.step == 1:
+        if st.session_state.step == 5:
+            watchlist_page(movies)
+        elif st.session_state.step == 4:
+            group_recommendations(genres, labels, movie_ids)
+        elif st.session_state.step == 1:
             preferences(genres)
         else:
             rate_movies(movies, labels, movie_ids)
     else:
         recommendations()
+    if step != 5:
+        watchlist_slot.button(f"My Watchlist ({len(st.session_state.watchlist)})",
+                              key="open_watchlist", on_click=open_watchlist)
     with st.expander("Credits"):
+        st.caption("Bollywood catalog: Hindi-language films from India, from Wikidata (CC0).")
         logo = ROOT / "assets/tmdb-logo.svg"
         if logo.exists():
             st.image(str(logo), width=95)
@@ -365,7 +565,8 @@ def main():
         st.link_button("The Movie Database", "https://www.themoviedb.org")
     if not any(poster_credentials()):
         with st.expander("Enable movie posters"):
-            st.write("Add your TMDB API key to .streamlit/secrets.toml as TMDB_API_KEY, or set the TMDB_API_KEY environment variable. The app works without it.")
+            st.write("For Docker, put TMDB_API_KEY in a .env file (see .env.example). Without Docker, "
+                     "add it to .streamlit/secrets.toml. Restart the app afterwards. The app works without it.")
             st.link_button("TMDB API settings", "https://www.themoviedb.org/settings/api")
 
 

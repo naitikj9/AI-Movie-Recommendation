@@ -1,4 +1,4 @@
-"""Exercise Streamlit widgets with MovieLens data and the saved artifacts."""
+"""Exercise Streamlit widgets with the Bollywood catalog."""
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -7,6 +7,8 @@ from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIPPED = "Haven’t Seen"
+FIRST = 229633  # 3 Idiots
+OTHER = 949228  # Sholay
 
 
 class AppFlowTests(unittest.TestCase):
@@ -22,7 +24,7 @@ class AppFlowTests(unittest.TestCase):
         return app
 
     def test_genre_navigation_does_not_load_model(self):
-        with patch("src.hybrid_recommender.HybridRecommender.from_project") as load_engine:
+        with patch("src.hybrid_recommender.HybridRecommender.from_bollywood") as load_engine:
             app = self.app()
             app.button(key="choose_genres").click().run()
             self.assertTrue(app.button(key="continue").disabled)
@@ -42,28 +44,28 @@ class AppFlowTests(unittest.TestCase):
         app.pills(key="genre_selection").select("Action").run()
         app.button(key="continue").click().run()
         picker = app.selectbox(key="movie_picker")
-        self.assertIn("Toy Story (1995)", picker.options)
-        self.assertGreater(len(picker.options), 9000)
-        picker.select(1).run()
+        self.assertIn("3 Idiots (2009)", picker.options)
+        self.assertGreater(len(picker.options), 3000)
+        picker.select(FIRST).run()
         preview = next(item.value for item in app.get("html") if 'class="search-preview"' in item.value)
         self.assertIn("Poster unavailable", preview)
-        self.assertIn("Toy Story (1995)", preview)
-        app.selectbox(key="rate_1").select(SKIPPED).run()
-        self.assertEqual(app.session_state["skipped_movies"], {1})
+        self.assertIn("3 Idiots (2009)", preview)
+        app.selectbox(key=f"rate_{FIRST}").select(SKIPPED).run()
+        self.assertEqual(app.session_state["skipped_movies"], {FIRST})
         self.assertEqual(app.session_state["user_ratings"], {})
-        app.selectbox(key="movie_picker").select(318).run()
-        app.selectbox(key="movie_picker").select(1).run()
-        self.assertEqual(app.selectbox(key="rate_1").value, SKIPPED)
-        app.selectbox(key="rate_1").select(4.5).run()
-        self.assertEqual(app.session_state["user_ratings"], {1: 4.5})
+        app.selectbox(key="movie_picker").select(OTHER).run()
+        app.selectbox(key="movie_picker").select(FIRST).run()
+        self.assertEqual(app.selectbox(key=f"rate_{FIRST}").value, SKIPPED)
+        app.selectbox(key=f"rate_{FIRST}").select(4.5).run()
+        self.assertEqual(app.session_state["user_ratings"], {FIRST: 4.5})
         self.assertEqual(app.session_state["skipped_movies"], set())
-        app.selectbox(key="edit_1").select(SKIPPED).run()
-        self.assertEqual(app.selectbox(key="rate_1").value, SKIPPED)
+        app.selectbox(key=f"edit_{FIRST}").select(SKIPPED).run()
+        self.assertEqual(app.selectbox(key=f"rate_{FIRST}").value, SKIPPED)
         self.assertEqual(app.session_state["user_ratings"], {})
-        app.selectbox(key="rate_1").select(2.0).run()
-        app.button(key="remove_1").click().run()
+        app.selectbox(key=f"rate_{FIRST}").select(2.0).run()
+        app.button(key=f"remove_{FIRST}").click().run()
         self.assertEqual(app.session_state["user_ratings"], {})
-        self.assertIsNone(app.selectbox(key="rate_1").value)
+        self.assertIsNone(app.selectbox(key=f"rate_{FIRST}").value)
         app.button(key="get_recommendations").click().run()
         self.assertFalse(app.exception)
         markup = " ".join(item.value for item in app.get("html"))
@@ -76,7 +78,7 @@ class AppFlowTests(unittest.TestCase):
         app.button(key="choose_movies").click().run()
         self.assertTrue(app.button(key="get_recommendations").disabled)
         for index, (movie_id, rating) in enumerate(
-            [(356, 5.0), (318, 4.5), (296, 4.0), (593, 1.0), (2571, 5.0)], 1
+            [(229633, 5.0), (949228, 4.5), (20762668, 4.0), (1759650, 1.0), (843949, 5.0)], 1
         ):
             app.selectbox(key="movie_picker").select(movie_id).run()
             app.selectbox(key=f"rate_{movie_id}").select(rating).run()
@@ -95,14 +97,14 @@ class AppFlowTests(unittest.TestCase):
     def test_switch_modes_uses_only_relevant_inputs(self):
         app = self.app()
         self.assertIn("How would you like to", " ".join(item.value for item in app.get("html")))
-        ratings = {356: 5.0, 318: 4.5, 296: 4.0, 593: 1.0, 2571: 5.0}
+        ratings = {229633: 5.0, 949228: 4.5, 20762668: 4.0, 1759650: 1.0, 843949: 5.0}
         app.session_state["user_ratings"] = ratings
         app.button(key="choose_genres").click().run()
         app.pills(key="genre_selection").select("Action").run()
         app.button(key="continue").click().run()
         app.button(key="get_recommendations").click().run()
         profile, results = app.session_state["recommendation_result"]
-        self.assertEqual(profile, ("genres", ("Action",), tuple(sorted(ratings.items()))))
+        self.assertEqual(profile, ("genres", ("Action",), tuple(sorted(ratings.items())), "All years"))
         self.assertTrue(results.favorite_genre_score.notna().any())
 
         app.button(key="update_preferences").click().run()
@@ -112,13 +114,80 @@ class AppFlowTests(unittest.TestCase):
         app.session_state["favorite_genres"] = ["Sci-Fi"]
         app.button(key="get_recommendations").click().run()
         profile, results = app.session_state["recommendation_result"]
-        self.assertEqual(profile, ("movies", (), tuple(sorted(ratings.items()))))
+        self.assertEqual(profile, ("movies", (), tuple(sorted(ratings.items())), "All years"))
         self.assertTrue(results.favorite_genre_score.isna().all())
 
         app.button(key="update_preferences").click().run()
         app.button(key="choose_genres").click().run()
         self.assertEqual(app.pills(key="genre_selection").value, [])
         self.assertTrue(app.button(key="continue").disabled)
+
+    def test_group_flow_shows_each_persons_match(self):
+        app = self.app()
+        app.button(key="choose_group").click().run()
+        self.assertTrue(app.button(key="group_submit").disabled)
+        app.multiselect(key="group_genres_0").select("Action").run()
+        app.multiselect(key="group_genres_1").select("Comedy").run()
+        app.button(key="group_submit").click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        _, results = app.session_state["group_result"]
+        self.assertEqual(len(results), 6)
+        markup = " ".join(item.value for item in app.get("html"))
+        self.assertIn("Match for each person", markup)
+        self.assertIn("Person 2", markup)
+
+    def test_mood_fills_genres_and_manual_change_clears_it(self):
+        app = self.app()
+        app.button(key="choose_genres").click().run()
+        app.pills(key="mood_selection").set_value("Romantic").run()
+        self.assertEqual(app.session_state["favorite_genres"], ["Musical", "Romance"])
+        self.assertEqual(app.pills(key="genre_selection").value, ["Musical", "Romance"])
+        self.assertFalse(app.button(key="continue").disabled)
+        app.pills(key="genre_selection").set_value(["Romance"]).run()
+        self.assertIsNone(app.pills(key="mood_selection").value)
+        self.assertEqual(app.session_state["favorite_genres"], ["Romance"])
+        self.assertFalse(app.exception)
+
+    def test_era_filter_and_watchlist(self):
+        app = self.app()
+        app.button(key="choose_genres").click().run()
+        app.pills(key="genre_selection").select("Action").run()
+        app.button(key="continue").click().run()
+        app.button(key="get_recommendations").click().run()
+        app.selectbox(key="result_era").select("90s").run()
+        _, results = app.session_state["recommendation_result"]
+        self.assertEqual(len(results), 6)
+        self.assertTrue(results.title.str.contains(r"\(199\d\)$").all())
+        movie_id = int(results.movieId.iloc[0])
+        app.button(key=f"result_watch_{movie_id}").click().run()
+        self.assertEqual(app.session_state["watchlist"], [movie_id])
+        self.assertIn("(1)", app.button(key="open_watchlist").label)
+        app.button(key="open_watchlist").click().run()
+        self.assertIn(results.title.iloc[0], [item.value for item in app.text])
+        app.button(key="watchlist_back").click().run()
+        self.assertEqual(app.selectbox(key="result_era").value, "90s")
+        app.button(key="open_watchlist").click().run()
+        app.button(key=f"list_watch_{movie_id}").click().run()
+        self.assertEqual(app.session_state["watchlist"], [])
+        self.assertIn("Nothing saved yet", app.info[0].value)
+        self.assertFalse(app.exception)
+
+    def test_group_inputs_survive_a_watchlist_visit(self):
+        app = self.app()
+        app.button(key="choose_group").click().run()
+        app.multiselect(key="group_genres_0").select("Action").run()
+        app.multiselect(key="group_genres_1").select("Comedy").run()
+        app.selectbox(key="group_era").select("2010s").run()
+        app.button(key="group_submit").click().run()
+        _, results = app.session_state["group_result"]
+        self.assertTrue(results.title.str.contains(r"\(201\d\)$").all())
+        app.button(key="open_watchlist").click().run()
+        app.button(key="watchlist_back").click().run()
+        self.assertEqual(app.multiselect(key="group_genres_0").value, ["Action"])
+        self.assertEqual(app.selectbox(key="group_era").value, "2010s")
+        self.assertIn("Match for each person", " ".join(item.value for item in app.get("html")))
+        self.assertFalse(app.exception)
 
     def test_invalid_retained_movie_id_can_be_removed(self):
         app = self.app()

@@ -1,0 +1,7 @@
+# Runtime packages only. requirements.txt also holds the notebook, model, and macOS tooling.
+streamlit==1.65.0
+pandas==3.0.6
+numpy==2.5.3
+scikit-learn==1.9.1
+requests==2.34.2
+pillow==12.3.0

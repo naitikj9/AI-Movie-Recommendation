@@ -216,3 +216,41 @@ Only movie IDs are sent to TMDB—not your genres, ratings, or model files. Post
 recommendation ranking or modify the neural network. Requests and Pillow are already existing
 dependencies. The credits section identifies TMDB and includes its non-endorsement notice.
 See [TMDB image documentation](https://developer.themoviedb.org/docs/image-basics).
+
+## Credits and additions
+
+Based on [AI-Movie-Recommendation](https://github.com/bpisciotti/AI-Movie-Recommendation)
+by bpisciotti, used with permission. The sections above describe the original project.
+
+### Added in this fork
+
+- **Group picks:** two or three people get one shared list. Each person's scores become percentiles,
+  then the list is ranked by the group average or by the lowest individual match (least misery).
+  Movies anyone has rated are excluded.
+- **Score breakdown:** each "Why this movie?" card shows how its ranking points add up.
+- **Docker:** run `docker compose up --build`, then open http://localhost:8501. It installs
+  `requirements-docker.txt`.
+
+### Bollywood catalog
+
+The app in this fork recommends **only Hindi-language films from India**. This replaces the
+MovieLens behavior described in the earlier sections.
+
+- Data comes from [Wikidata](https://www.wikidata.org) (CC0), saved in `data/bollywood/movies.csv`.
+  Rebuild it with `python scripts/fetch_bollywood.py`. "Hindi film from India" is a close proxy
+  for Bollywood, not an exact label, and films without a usable genre or date are left out.
+- Recommendations are **genre-based**. The catalog has no user ratings, so the trained MovieLens
+  model is not used by the app. Its code and tests remain in the repository.
+- Score = 70% genre match + 30% popularity (log-scaled count of Wikipedia and sister-site pages),
+  so equal genre matches no longer all score 100. Popularity measures reach, not quality.
+
+### Discovery features
+
+- **Posters:** copy `.env.example` to `.env` and add a TMDB credential (Docker), or use
+  `.streamlit/secrets.toml` (local runs). Films without a TMDB link keep the placeholder.
+- **Release era:** filters recommendations and group picks by year.
+- **Mood picker:** pre-selects genres for a mood; you can still change them.
+- **Watchlist:** save recommendations and download them as CSV. It lasts for the browser session.
+- **Smaller Docker image:** the app does not use the trained model, so the image leaves out
+  TensorFlow and `models/`.
+

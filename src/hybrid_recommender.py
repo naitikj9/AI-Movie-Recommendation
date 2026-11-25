@@ -48,6 +48,12 @@ class HybridRecommender:
         if not required.issubset(movies.columns):
             raise ValueError("Movie metadata must include movieId, title, genres.")
         self._movies = movies[["movieId", "title", "genres"]].copy().reset_index(drop=True)
+        # Optional popularity from Wikipedia sitelink counts, log-scaled to [0, 1].
+        links = (movies["sitelinks"].fillna(0).clip(lower=0).to_numpy(dtype=float)
+                 if "sitelinks" in movies.columns else np.zeros(len(movies)))
+        self._movies["sitelinks"] = links.astype(int)
+        scaled = np.log1p(links)
+        self._movies["popularity"] = scaled / scaled.max() if scaled.any() else scaled
         if self._movies.movieId.isna().any() or not self._movies.movieId.is_unique:
             raise ValueError("Movie IDs must be present and unique.")
         self._movies["movieId"] = self._movies.movieId.map(_integer_id)
@@ -117,6 +123,12 @@ class HybridRecommender:
         return cls(movies, movie_mapping, embedding_weights, ratings=ratings,
                    model=model, user_to_index=user_mapping)
 
+    @classmethod
+    def from_bollywood(cls, root):
+        """Genre-only catalog from Wikidata; it has no user ratings or trained embeddings."""
+        movies = pd.read_csv(Path(root) / "data/bollywood/movies.csv")
+        return cls(movies, {}, np.empty((0, 0)))
+
     @property
     def movies(self):
         """Return a copy: callers cannot alter the shared cached metadata."""
@@ -149,7 +161,8 @@ class HybridRecommender:
 
     def recommend_for_new_user(self, favorite_genres, user_ratings, top_n=10,
                                content_weight=0.5, embedding_weight=0.5,
-                               min_rating_count=0):
+                               min_rating_count=0, explain=True, popularity_weight=0.0,
+                               allowed_ids=None):
         """Return ranking scores (not predicted stars) plus deterministic explanations.
 
         Ratings shape separate genre and movie-embedding profiles using (rating - 3).
@@ -174,6 +187,9 @@ class HybridRecommender:
         if not np.isfinite(weights).all() or (weights < 0).any() or weights.sum() <= 0:
             raise PreferenceError("Use finite nonnegative weights with a positive total.")
         weights /= weights.sum()
+        if (isinstance(popularity_weight, bool) or not isinstance(popularity_weight, Real)
+                or not 0 <= popularity_weight < 1):
+            raise PreferenceError("popularity_weight must be at least 0 and below 1.")
         favorite_profile = np.zeros(len(self.genres))
         for genre in genres:
             favorite_profile[self._genre_columns[genre]] = 1.0
@@ -225,12 +241,32 @@ class HybridRecommender:
                                             np.where(favorite_available, favorite_score, np.nan))
         results["favorite_genre_score"] = np.where(favorite_available, favorite_score, np.nan)
         results["embedding_score"] = np.where(embedding_available, embedding_score, np.nan)
-        results["hybrid_score"] = scores
+        popularity = results.popularity.to_numpy()
+        results["hybrid_score"] = (1 - popularity_weight) * scores + popularity_weight * popularity
+        # Additive parts of hybrid_score, so the UI can show where each score comes from.
+        favorite_share = np.where(favorite_available,
+                                  FAVORITE_GENRE_WEIGHT if ratings_available.any() else 1.0, 0.0)
+        ratings_share = 1.0 - favorite_share
+        safe_denominator = np.where(ratings_available, denominator, 1.0)
+        results["favorite_part"] = favorite_share * favorite_score
+        results["genre_part"] = (ratings_share * weights[0] * content_available
+                                 * content_score / safe_denominator)
+        results["history_part"] = (ratings_share * weights[1] * embedding_available
+                                   * embedding_score / safe_denominator)
+        results["neutral_part"] = np.where(ratings_available, 0.0, ratings_share * 0.5)
+        for part in ["favorite_part", "genre_part", "history_part", "neutral_part"]:
+            results[part] *= 1 - popularity_weight
+        results["popularity_part"] = popularity_weight * popularity
         eligible = ((ratings_available | favorite_available) & ~results.movieId.isin(ratings).to_numpy()
                     & (results.rating_count.to_numpy() >= min_rating_count))
+        if allowed_ids is not None:
+            # Filters candidates only; rated movies outside the filter still shape the profile.
+            eligible &= results.movieId.isin(allowed_ids).to_numpy()
         results = results[eligible].sort_values(
             ["hybrid_score", "rating_count", "movieId"], ascending=[False, False, True]
         ).head(top_n).copy()
+        if not explain:
+            return results.reset_index(drop=True)
         liked_with_embeddings = [(self._positions[mid], rating) for mid, rating in ratings.items()
                                  if rating > 3 and self._has_embedding[self._positions[mid]]]
         explanations = []
